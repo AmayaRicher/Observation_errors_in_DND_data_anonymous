@@ -1,0 +1,619 @@
+---
+title: "Rare but pervasive: false-positive errors bias estimates of fine-scale occupancy probabilities in plant population surveys"
+subtitle: "Analysis and Figures"
+format:
+  html:
+    embed-resources: true
+    self-contained-math: true
+editor: visual
+toc: true
+toc-location: left
+---
+
+This file contains the code used to analyze observation errors in fine-scale detection/non-detection (DND) data in plant population monitoring. The code contains two parts, one for the data preparation and the second for the statistical analysis and the drawing of graphs. Only graphs that were published in the main text of the paper are printed in this file. The code used to simulate data, fit occupancy models and generate the graph and the table from the simulation analysis detailed in the main text of the paper are in the DND_data_Simulations.R file. To view supplementary analysis and graphs, see DND_data_SuppMat.qmd file.
+
+```{r}
+rm(list = ls())	# Clean the workspace
+```
+
+# Loading packages
+
+```{r}
+library(dplyr)
+library(tidyverse)
+library(readxl)
+library(readr)
+library(ggplot2)
+library(raster)
+library(spdep)
+library(ggeffects)
+library(purrr)
+library(sjPlot)
+library(ggpubr)
+library(knitr)
+library(kableExtra)
+library(glmmTMB)
+```
+
+# Loading tables
+
+```{r}
+#Data from the observation of cell occurrence
+df_data <- read_delim("data/df_data_cells.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE) %>%
+  filter(species !='EUPPEP1' & species != 'CALARV1' & species != 'PLACOR') #removing 3 sessions because of unclean data
+
+#Covariates
+  #date and species conspicuousness
+df_species <- read_delim("data/data_species_detectability.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE) %>%
+  rename(species_conspicuousness = species_detectability,
+         species = species_code)
+
+  #habitat closure
+df_habitat_closure <- read_delim("data/df_data_habitat_closure.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE) %>%
+    mutate(habitat_closure = as.numeric(gsub(",", ".",habitat_closure)))
+
+  #observers' experience in botany
+df_exp_bota <- read_delim("data/data_observer_experience_botany_anonymous.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE) %>%
+  mutate(exp_bota = ceiling(as.numeric(exp_bota)/2)) # reclassify the experience levels into 5 categories instead of 10
+
+  #quadrat order
+df_quadrat_order <- read_delim("data/df_quadrat_order_anonymous.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE) %>%
+  rename(quadrat = quadrat_num) %>%
+  mutate(quadrat = as.numeric(gsub('quadrat','',quadrat))) %>%
+  dplyr::select(-c(quadrat_order_30s, quadrat_order_1m)) %>%
+  rename(quadrat_order = quadrat_order_cells)
+
+  #time spent counting cells in a quadrat
+df_quadrat_time <- read_delim("data/df_data_TTD_time_cover.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE) %>%
+  dplyr::select(-c(TTD, cover))
+```
+
+We remove the 3 combinations of observer-species, considered invalid (extreme count values, wrong species counted, ...):
+
+```{r}
+df_data <- df_data %>%
+  filter(!(species == 'ALLsp' & obs_id == 'obs_jaho') & !(species == 'ALLsp' & obs_id == 'obs_bqiy') & !(species == 'EUPHEL' & obs_id == 'obs_lbev'))
+```
+
+# 1. Prepare data
+
+## 1. Join imported tables
+
+We join quadrat-scale information (date, time spent on a quadrat, habitat closure, quadrat order), observer information (observer experience in botany) and species information (conspicuousness).
+
+```{r}
+df_data_cells <- df_data %>%
+  left_join(df_species, by = join_by(species))%>%
+  left_join(df_habitat_closure, by = join_by(species, quadrat))%>%
+  left_join(df_exp_bota, join_by(obs_id)) %>%
+  relocate(species_name, .after = species) %>%
+  relocate(date, .after = species_name) %>%
+  relocate(species_conspicuousness, .after = species_name) %>%
+  relocate(habitat_closure, .after = quadrat) %>%
+  relocate(exp_bota, .after = obs_id) %>%
+  left_join(df_quadrat_order, by = join_by(species, quadrat, obs_id)) %>%
+  relocate(quadrat_order, .after = quadrat) %>%
+  left_join(df_quadrat_time, by = join_by(species, quadrat, obs_id)) %>%
+  relocate(counting_time_cells, .after = quadrat_order)
+
+summary(df_data_cells)
+
+remove(df_data,
+       df_exp_bota,
+       df_habitat_closure,
+       df_species,
+       df_quadrat_order,
+       df_quadrat_time)
+```
+
+## 2. Create presence/absence and detection/non-detection variables
+
+Presence/absence refers to the **true** occurrence of a species in a given cell, whereas detection/non-detection refers to the **observed** occurrence of a species in a cell.
+
+From the count data (number of plants detected by observers and TRUE number of plants per cell), we are going to create a new variable: detection/non-detection (*occurrence* variable) and true presence/absence (*occurrence_TRUE* variable), both coded by 1 for detection or presence respectively, and 0 for non-detection or absence respectively.
+
+```{r}
+df_data_cells <- df_data_cells %>%
+  mutate(occurrence = case_when({!is.na(count) & count>0} ~ 1, #detection
+                                {!is.na(count) & count== 0} ~ 0, #non-detection
+                                  is.na(count) ~ NA),
+         occurrence_TRUE = case_when(count_TRUE>0 ~ 1, #presence
+                                count_TRUE== 0 ~ 0)) #absence
+```
+
+Next, we create the *occurrence_detection* variable, which is a categorical variable which can take four values:
+
+-   TP : true-positive, detection and real presence
+
+-   TN : true-negative, non-detection and real absence
+
+-   FP : false-positive, detection but the species was absent in reality
+
+-   FN : false-negative, non-detection but the species was present in reality (the species was missed by the observer)
+
+This gives us the confusion matrix:
+
+|                   | Presence (1) | Absence (0) |
+|-------------------|--------------|-------------|
+| Detection (1)     | TP           | FP          |
+| Non-detection (0) | FN           | TN          |
+
+```{r}
+df_data_cells <- df_data_cells %>%
+  mutate(occurrence_detection = case_when({{!is.na(occurrence) & occurrence == 1} & occurrence_TRUE == 1} ~ 'TP',
+                                          {{!is.na(occurrence) & occurrence == 0} & occurrence_TRUE == 0} ~ 'TN',
+                                          {{!is.na(occurrence) & occurrence == 1} & occurrence_TRUE == 0} ~ 'FP',
+                                          {{!is.na(occurrence) & occurrence == 0} & occurrence_TRUE == 1} ~ 'FN',
+                                          is.na(occurrence) ~ NA)) %>%
+  mutate(occurrence_detection = as.factor(occurrence_detection))
+```
+
+## 3. Aggregate data at quadrat-scale
+
+```{r}
+df_data_quadrat <- df_data_cells %>%
+  group_by(species, obs_id, quadrat,
+           quadrat_order,
+           counting_time_cells,
+           species_name,
+            species_conspicuousness,
+            date,
+            exp_bota,
+            habitat_closure) %>%
+  summarise(occupied_cells_num = sum(occurrence),
+            occupied_cells_num_TRUE = sum(occurrence_TRUE),
+            count_tot = sum(count),
+            count_tot_TRUE = sum(count_TRUE)) %>%
+  left_join(.,df_data_cells %>%
+  filter(!is.na(occurrence_detection)) %>% #we remove quadrats that were not surveyed
+  group_by(species, obs_id, quadrat,
+           quadrat_order,
+           counting_time_cells,
+           species_name,
+            species_conspicuousness,
+            date,
+            exp_bota,
+            habitat_closure,
+           occurrence_detection) %>%
+  summarise(occurrence_detection_n = n()) %>%
+  pivot_wider(names_from = occurrence_detection,
+              values_from = occurrence_detection_n) %>%
+  mutate(TP=case_when(is.na(TP) ~ 0,
+                      TRUE ~ TP),
+         TN=case_when(is.na(TN) ~ 0,
+                      TRUE ~ TN),
+         FP=case_when(is.na(FP) ~ 0,
+                      TRUE ~ FP),
+         FN=case_when(is.na(FN) ~ 0,
+                      TRUE ~ FN)) %>%
+  mutate(tot=TP+TN+FP+FN,
+         true=TP+TN,
+         accuracy=true/tot,
+         recall=TP/(TP+FN), #note: for empty quadrats where all cells are TN, recall is NA
+         specificity=TN/(TN+FP)) %>%
+  dplyr::select(-c(tot,true)))
+```
+
+Saving the *df_data_quadrat* table:
+
+```{r}
+write.table(df_data_quadrat, "saved_tables/df_data_quadrat.csv", row.names = F, sep = ";")
+```
+
+## 4. Add covariates describing adjacent cells
+
+The objective is to create a variable that gives the mean number of individuals across adjacent cells of each cell.
+
+To do this, we want to join to each row of the df_data_cells table (e.g. each cell) information on adajcent cells. For this we first create a ragged list of adjacent cells id for each of the 100 cells in a quadrat:
+
+(The code chunks below are marked as comments because they require a lot of computing time. To save you time, we have provided the resulting table so you can import it directly.)
+
+```{r}
+# r <- matrix(c(1:100), nrow=10, ncol=10) %>%
+#   raster()
+# 
+# p <- rasterToPolygons(r) #creating the polygon
+# 
+# nb <- poly2nb(p, queen = FALSE)
+```
+
+Now we add a column in df_data_cells with the number of the cell from 1 to 100 within its quadrat rather than A1 to J10:
+
+```{r}
+# correspondance_cells <- df_data_cells[1:100,'cell'] %>%
+#   mutate(cell_number = c(1:100))
+# 
+# df_data_cells <- df_data_cells %>%
+#   left_join(correspondance_cells, by = join_by(cell))
+```
+
+And now we loop across all unique quadrats, all cells of each quadrat and add columns to each cell=each row about true abundance:
+
+```{r}
+# #adding a column with unique id of the quadrats to be able to loop across eahc of them:
+# df_data_cells <- df_data_cells %>%
+#   mutate(quadrat_id = paste(species, obs_id, quadrat, sep = '_'))
+# 
+# #adding 4 columns for up to potentially 4 adjacent cells for each cell (min 2 max 4 adjacent cells)
+# df_data_cells <- df_data_cells %>%
+#   mutate(adjacent_1 = NA, adjacent_2 = NA, adjacent_3 = NA, adjacent_4 = NA) %>%
+#   mutate(adjacent_count_TRUE_1 = NA, adjacent_count_TRUE_2 = NA, adjacent_count_TRUE_3 = NA, adjacent_count_TRUE_4 = NA)
+# 
+# #starting loop:
+# for (i in unique(df_data_cells$quadrat_id)) {
+#   for (j in df_data_cells[df_data_cells$quadrat_id == i,]$cell_number) {
+#     adjacent_n <- 1
+#     adjacent_name <- c('adjacent_1', 'adjacent_2', 'adjacent_3', 'adjacent_4')
+#     adjacent_count_TRUE <- c('adjacent_count_TRUE_1', 'adjacent_count_TRUE_2', 'adjacent_count_TRUE_3', 'adjacent_count_TRUE_4')
+#     for (k in nb[[j]]) {
+#       a <- adjacent_name[adjacent_n]
+#       b <- adjacent_count_TRUE[adjacent_n]
+#       df_data_cells[{df_data_cells$quadrat_id == i & df_data_cells$cell_number == j},][[a]] <- k
+#       df_data_cells[{df_data_cells$quadrat_id == i & df_data_cells$cell_number == j},][[b]] <- df_data_cells[{df_data_cells$quadrat_id == i & df_data_cells$cell_number == k},]$count_TRUE
+#       adjacent_n <- adjacent_n + 1
+#     }
+#   }
+# }
+```
+
+Because this took so long, let's store the table and re-import it.
+
+Before doing that, we join count_tot_TRUE from df_data_quadrat:
+
+```{r}
+#df_data_cells <- df_data_cells %>%
+#  left_join(unique(dplyr::select(ungroup(df_data_quadrat),c(species,quadrat,count_tot_TRUE))))
+```
+
+```{r}
+#write.table(df_data_cells, "saved_tables/df_data_cells.csv", row.names = F, sep = ";")
+
+df_data_cells <- read_delim("saved_tables/df_data_cells.csv", 
+                       delim = ";", escape_double = FALSE, trim_ws = TRUE)
+```
+
+Finally we only keep occupied OR empty cells:
+
+```{r}
+df_data_occup_cells_model <- df_data_cells %>%
+  filter(!is.na(count)) %>% #getting rid of unsurveyed cells
+  filter(occurrence_detection == 'TP' | occurrence_detection == 'FN') %>%
+  mutate(dnd_of_occupied_cells = case_when(occurrence_detection == 'FN' ~ 0,
+                               occurrence_detection == 'TP' ~ 1))
+
+df_data_empty_cells_model <- df_data_cells %>%
+  filter(!is.na(count)) %>% #getting rid of unsurveyed cells
+  filter(occurrence_detection == 'TN' | occurrence_detection == 'FP') %>%
+  mutate(dnd_of_empty_cells = case_when(occurrence_detection == 'TN' ~ 0,
+                               occurrence_detection == 'FP' ~ 1))
+```
+
+We create two additional variables, one for the average number of individuals in adjacent cells, and the other for the location of the cell, which takes the value 1 if the cell is on the edge of the quadrat, and 0 if not.
+
+```{r}
+df_data_occup_cells_model <- df_data_occup_cells_model %>%
+  mutate(edge=case_when({is.na(adjacent_3) | is.na(adjacent_4)} ~ 1,
+                        TRUE ~ 0)) %>%
+  mutate(edge=as.factor(edge)) %>%
+  rowwise() %>%
+  mutate(mean_adjacent_count = mean(c_across(adjacent_count_TRUE_1:adjacent_count_TRUE_4), na.rm=TRUE),
+         sum_adjacent_count = sum(c_across(adjacent_count_TRUE_1:adjacent_count_TRUE_4), na.rm=TRUE)) %>%
+  ungroup()
+
+df_data_empty_cells_model <- df_data_empty_cells_model %>%
+  mutate(edge=case_when({is.na(adjacent_3) | is.na(adjacent_4)} ~ 1,
+                        TRUE ~ 0)) %>%
+  mutate(edge=as.factor(edge)) %>%
+  rowwise() %>%
+  mutate(mean_adjacent_count = mean(c_across(adjacent_count_TRUE_1:adjacent_count_TRUE_4), na.rm=TRUE),
+         sum_adjacent_count = sum(c_across(adjacent_count_TRUE_1:adjacent_count_TRUE_4), na.rm=TRUE)) %>%
+  ungroup()
+```
+
+Saving tables used for model fitting:
+
+```{r}
+write.table(df_data_occup_cells_model, "saved_tables/df_data_occup_cells_model.csv", row.names = F, sep = ";")
+write.table(df_data_empty_cells_model, "saved_tables/df_data_empty_cells_model.csv", row.names = F, sep = ";")
+```
+
+# 2. Fit the models
+
+We prepare a table with a description of all variables we used in the models and our associated hypotheses:
+
+```{r}
+variables_glm_table <- data.frame(Variable = c("Species conspicuousness", "Habitat closure", "Botany experience", "Quadrat order", "Time spent surveying the quadrat", "Number of individuals in the quadrat", "Number of individuals in the cell", "Mean number of individuals in adjacent cells", "Quadrat edge", "Species conspicuousness x Habitat closure", "Species conspicuousness x Number of individuals in the cell", "Species conspicuousness x Mean number of individuals in adjacent cells", "Quadrat order x Botany experience", "Botany experience x Number of individuals in the cell", "Number of individuals in the cell x Mean number of individuals in adjacent cells", "Time spent surveying the quadrat x Number of individuals in the quadrat"))
+
+variables_glm_table$Description <- c('Conspicuousness of the species at the time of the field session',
+                                    'Closure of the vegetation in the quadrat',
+                                    'Level of experience in botany and plant population surveys of the observer',
+                                    'Order in which the quadrat was surveyed by the observer',
+                                    'Time the observer spent counting individuals in the quadrat (in minutes)',
+                                    'Number of individuals in the quadrat',
+                                    'Number of individuals in the cell',
+                                    'Mean number of individuals in the adjacent cells of a cell',
+                                    'Position of a cell in the quadrat (on the edge or not)',
+                                    '',
+                                    '',
+                                    '',
+                                    '',
+                                    '',
+                                    '',
+                                    ''
+                                    )
+
+variables_glm_table$Type <- c('Ordinal',
+                              'Continuous',
+                              'Ordinal',
+                              'Continuous',
+                              'Continuous',
+                              'Continuous',
+                              'Continuous',
+                              'Continuous',
+                              'Categorical',
+                              '',
+                              '',
+                              '',
+                              '',
+                              '',
+                              '',
+                              ''
+                              )
+
+variables_glm_table$Values <- c('1,2,3,4',
+                                '-2.00 - 3.24',
+                                '1,2,3,4,5',
+                                '1,2,3,...,10',
+                                '0-45.05',
+                                '0-504',
+                                '0-30',
+                                '0-16',
+                                '0,1',
+                                '',
+                                '',
+                                '',
+                                '',
+                                '',
+                                '',
+                                ''
+                                )
+
+variables_glm_table$Level <- c('Session',
+                                'Quadrat',
+                                'Observer',
+                                'Quadrat x observer',
+                                'Quadrat x observer',
+                                'Quadrat',
+                                'Cell',
+                                'Cell',
+                                'Cell',
+                                '',
+                                '',
+                                '',
+                                '',
+                                '',
+                                '',
+                                ''
+                               )
+
+variables_glm_table$`Hypothesis on the effect on the detection probability` <- c('A conspicuous species is easier to detect, so the probability of detecting its presence in a cell is higher',
+                                        'Dense vegetation can hide the species, so the probability of detecting a species in a cell is lower in a closed habitat',
+                                        'An experienced observer has a higher detection probability than a novice observer',
+                                        'The detection probability of an observer increases (training effect) or decreases (fatigue effect) through the experiment',
+                                        'Detection probability increases with the time spent surveying the quadrat',
+                                        'A quadrat containing more individuals is more tiring to survey, so the detection probability decreases with the number of individuals in the quadrat',
+                                        'The presence of a species in a cell is more visible if the cell contains many individuals, so the detection probability increases with the number of individuals in the cell',
+                                        'The presence of a species in a cell is more visible if the adjacent cells contain many individuals, so the detection probability increases with the mean number of individuals in adjacent cells',
+                                        'Detection probability could be higher or lower for cells on the edge of a quadrat',
+                                        'Detection probability increases with species conspicuousness, all the more so in an open habitat',
+                                        'Detection probability increases with the mean number of individuals in adjacent cells, all the more so for a more conscpicuous species',
+                                        'Detection probability increases with the number of individuals in the cell, all the more so for a more conscpicuous species',
+                                        'Detection probability increases or decreases throughout the experience, all the more so for a less experienced observer',
+                                        'Detection probability increases with the number of individuals in the cell, all the more so for a less experienced observer',
+                                        'Detection probability increases with the number of individuals in the cell, all the more so for a cell surrounded by adjacent cells containing in average a high number of individuals',
+                                        'Detection probability increases with the time spent surveying the quadrat, all the more so for a quadrat containing many individuals')
+
+variables_glm_table$`Hypothesis on the effect on the FPE probability` <- c('FPE probability decreases with species conspicuousness',
+                                        'Dense vegetation is harder to observe, so the FPE probability increases with habitat closure',
+                                        'An experienced observer has a lower FPE probability than a novice observer',
+                                        'The FPE probability of an observer decreases (training effect) or increases (fatigue effect) through the experiment',
+                                        'FPE probability decreases with the time spent surveying the quadrat',
+                                        'A quadrat containing more individuals is more tiring to survey, so the FPE probability increases with the number of individuals in the quadrat',
+                                        '',
+                                        'Misassigning an individual in an unoccupied cell is more likely if the adjacent cells contain many individuals, so the FPE probability increases with the mean number of individuals in adjacent cells',
+                                        'FPE probability could be higher or lower for cells on the edge of a quadrat',
+                                        'FPE probability could increase or decrease with species conspicuousness, all the more so in an open habitat',
+                                        '',
+                                        'FPE probability increases with the mean number of individuals in adjacent cells, all the more so for a more conspicuous species',
+                                        'FPE probabiliy decreases or increases throughout the experience, all the more so for a less experienced observer',
+                                        '',
+                                        '',
+                                        'FPE decreases with the time spent surveying the quadrat, all the more so for a quadrat containing many individuals'
+                                        )
+
+variables_glm_table[1:9,] %>%
+  kbl(format = 'html') %>%
+  kable_classic(full_width = F, html_font = "LM Roman") %>%
+  kable_styling(row_label_position = 1, bootstrap_options = c("striped", "hover"), font_size = 13) %>%
+  row_spec(0, background = "lightgrey")
+
+variables_glm_table[10:16,] %>%
+  kbl(format = 'html') %>%
+  kable_classic(full_width = F, html_font = "LM Roman") %>%
+  kable_styling(row_label_position = 1, bootstrap_options = c("striped", "hover"), font_size = 13) %>%
+  row_spec(0, background = "lightgrey")
+```
+
+## 1. Truly occupied cells
+
+```{r}
+fit_occupied_cells <- glmmTMB::glmmTMB(dnd_of_occupied_cells ~ (1|species) + (1|species:quadrat) + (1|obs_id)
+                   + scale(species_conspicuousness) * habitat_closure
+                   + scale(species_conspicuousness) * scale(count_TRUE)
+                   + scale(species_conspicuousness) * scale(mean_adjacent_count)
+                   + scale(quadrat_order) * scale(exp_bota)
+                   + scale(exp_bota) * scale(count_TRUE)
+                   + scale(mean_adjacent_count) * scale(count_TRUE)
+                   + edge
+                   + scale(counting_time_cells) * scale(count_tot_TRUE)
+                   ,
+                         data = df_data_occup_cells_model, family = binomial(link = "logit"))
+
+summary(fit_occupied_cells)
+```
+
+Plot the predictions:
+
+```{r}
+prediction_occupied_cells_1 <- ggpredict(fit_occupied_cells, terms = c('count_TRUE [1:10]', 'exp_bota', 'habitat_closure[-1.5, 0.5, 2.5]', 'species_conspicuousness[1,4]'), condition = c(quadrat_order = 5, mean_adjacent_count= 1, edge = 0, counting_time_cells = 380, count_tot_TRUE = 32), type = 'fixed')
+
+prediction_occupied_cells_2 <- ggpredict(fit_occupied_cells, terms = c('count_TRUE [1:10]', 'mean_adjacent_count [0,2,4]'), condition = c(species_conspicuousness = 2, habitat_closure = 0.5, quadrat_order = 5, exp_bota = 2.5, edge = 0, counting_time_cells = 380, count_tot_TRUE = 32), type = 'fixed')
+
+prediction_occupied_cells_3 <- ggpredict(fit_occupied_cells, terms = c('counting_time_cells[all]'), condition = c(species_conspicuousness = 2, habitat_closure = 0.5, count_TRUE = 2, mean_adjacent_count = 1, quadrat_order = 5, exp_bota = 2.5, edge = 0, count_tot_TRUE = 32), type = 'fixed')
+
+prediction_occupied_cells_4 <- ggpredict(fit_occupied_cells, terms = c('quadrat_order[1:10]','exp_bota'), condition = c(species_conspicuousness = 2, habitat_closure = 0.5, count_TRUE = 2, mean_adjacent_count = 1, edge = 0, counting_time_cells = 380, count_tot_TRUE = 32), type = 'fixed')
+
+#Fig 1
+prediction_occupied_cells_1 %>%
+  rename(`Number of individuals in the cell`= x,
+         `Species conspicuousness`= panel,
+         `Botany experience`= group,
+         `Habitat closure`= facet,
+         `p1|1` = predicted) %>%
+ggplot(aes(x=`Number of individuals in the cell`,y=`p1|1`, color=`Botany experience`)) +
+  geom_line() +
+  geom_ribbon(aes(ymin=conf.low, ymax=conf.high, fill=`Botany experience`),  alpha=0.2, colour = NA) +
+  facet_grid(`Habitat closure`~`Species conspicuousness`, labeller = purrr::partial(label_both, sep = " = ")) +
+  scale_y_continuous(limits = c(0.08, 1)) +
+  scale_x_continuous(limits = c(1, 10), breaks = c(1:10)) +
+  labs(y='Cell detection probability') +
+  theme_bw() +
+  theme(panel.grid.minor.x = element_blank(),
+        panel.grid.major.y = element_line( size=.1, color="grey" ),
+        legend.position="bottom")
+
+#Fig 2
+ggarrange(
+prediction_occupied_cells_2 %>%
+    rename(`Number of individuals in the cell`= x,
+         `Mean number of individuals in adjacent cells`= group,
+         `p1|1` = predicted) %>%
+ggplot(aes(x=`Number of individuals in the cell`, y=`p1|1`, color = `Mean number of individuals in adjacent cells`)) +
+  geom_line() +
+  geom_ribbon(aes(ymin=conf.low, ymax=conf.high, fill=`Mean number of individuals in adjacent cells`),  alpha=0.2, colour = NA) +
+  scale_y_continuous(limits = c(0.5, 1)) +
+  scale_x_continuous(limits = c(1, 10), breaks = c(1:10)) +
+  scale_color_manual(values=c('0'='orange','2'='red','4'='purple')) +
+  scale_fill_manual(values=c('0'='orange','2'='red','4'='purple')) +
+  annotate("text", x = 1.5, y = 0.98, label = "(a)", size = 4, fontface = 2) +
+  labs(y='Cell detection probability',
+       x='Number of individuals\nin the cell',
+       fill="Mean number of\nindividuals\nin adjacent cells",
+       colour="Mean number of\nindividuals\nin adjacent cells") +
+  theme_bw(),
+prediction_occupied_cells_3 %>%
+  filter(x<=20*60) %>% #only keeping under 20mins
+    rename(`Time spent surveying the quadrat (min)`= x,
+           `p1|1` = predicted) %>%
+    ggplot(aes(x=`Time spent surveying the quadrat (min)`/60, y=`p1|1`)) +
+    geom_line() +
+    geom_ribbon(aes(ymin=conf.low, ymax=conf.high),  alpha=0.2, colour = NA) +
+    scale_y_continuous(limits = c(0.5, 1)) +
+    scale_x_continuous(limits = c(0, 20)) +
+    annotate("text", x = 1.5, y = 0.98, label = "(b)", size = 4, fontface = 2) +
+    labs(y='Cell detection probability',
+         x='Time spent surveying\nthe quadrat (min)') +
+    theme_bw(),
+prediction_occupied_cells_4 %>%
+    rename(`Quadrat order`= x,
+         `Botany experience`= group,
+         `p1|1` = predicted) %>%
+ggplot(aes(x=`Quadrat order`, y=`p1|1`, color = `Botany experience`)) +
+  geom_line() +
+  geom_ribbon(aes(ymin=conf.low, ymax=conf.high, fill=`Botany experience`),  alpha=0.2, colour = NA) +
+  scale_y_continuous(limits = c(0.5, 1)) +
+  scale_x_continuous(limits = c(1, 10), breaks = c(1:10)) +
+  annotate("text", x = 1.5, y = 0.98, label = "(c)", size = 4, fontface = 2) +
+  labs(y='Cell detection probability',
+       fill="Botany\nexperience",
+       colour="Botany\nexperience") +
+  theme_bw(),
+ncol = 3, common.legend = FALSE, legend = 'bottom', align = "h"
+)
+```
+
+## 2. Truly unoccupied cells
+
+```{r}
+fit_empty_cells <- glmmTMB::glmmTMB(dnd_of_empty_cells ~ (1|species) + (1|species:quadrat) + (1|obs_id)
+                   + scale(species_conspicuousness) * habitat_closure
+                   + scale(species_conspicuousness) * scale(mean_adjacent_count)
+                   + scale(quadrat_order) * scale(exp_bota)
+                   + edge
+                   + scale(counting_time_cells) * scale(count_tot_TRUE)
+                   ,
+                         data = df_data_empty_cells_model, family = binomial(link = "logit"))
+
+summary(fit_empty_cells)
+```
+
+Plot the predictions:
+
+```{r}
+prediction_empty_cells_1 <- ggpredict(fit_empty_cells, terms = c('mean_adjacent_count [all]'), condition = c(species_conspicuousness = 2, habitat_closure = 0.5, exp_bota = 2.5, quadrat_order = 5, edge = 0, counting_time_cells = 380, count_tot_TRUE = 32), type = 'fixed')
+
+prediction_empty_cells_2 <- ggpredict(fit_empty_cells, terms = c('counting_time_cells[all]'), condition = c(species_conspicuousness = 2, habitat_closure = 0.5, mean_adjacent_count = 1, quadrat_order = 5, exp_bota = 2.5, edge = 0, count_tot_TRUE = 32), type = 'fixed')
+
+prediction_empty_cells_3 <- ggpredict(fit_empty_cells, terms = c('quadrat_order[1:10]','exp_bota'), condition = c(species_conspicuousness = 2, habitat_closure = 0.5,  mean_adjacent_count = 1, edge = 0, counting_time_cells = 380, count_tot_TRUE = 32), type = 'fixed')
+
+#Fig 3
+ggarrange(
+prediction_empty_cells_1 %>%
+  rename(`Mean number of individuals in adjacent cells`= x,
+         `p1|0` = predicted) %>%
+  ggplot(aes(x=`Mean number of individuals in adjacent cells`, y=`p1|0`)) +
+  geom_line() +
+  geom_ribbon(aes(ymin=conf.low, ymax=conf.high),  alpha=0.2, colour = NA) +
+  coord_cartesian(ylim=c(0,0.04), xlim=c(0,2)) +
+  labs(y='False-positive error probability',
+       x='Mean number of individuals\nin adjacent cells') +
+  scale_x_continuous(breaks=seq(0,2,by=.5)) +
+  annotate("text", x = 0.15, y = 0.039, label = "(a)", size = 4, fontface = 2) +
+  theme_bw(),
+prediction_empty_cells_2 %>%
+  filter(x<=20*60) %>%
+    rename(`Time spent surveying the quadrat (min)`= x,
+           `p1|0` = predicted) %>%
+    ggplot(aes(x=`Time spent surveying the quadrat (min)`/60, y=`p1|0`)) +
+    geom_line() +
+    geom_ribbon(aes(ymin=conf.low, ymax=conf.high),  alpha=0.2, colour = NA) +
+    scale_y_continuous(limits = c(0,0.04)) +
+    scale_x_continuous(limits = c(0, 20)) +
+    annotate("text", x = 1.5, y = 0.039, label = "(b)", size = 4, fontface = 2) +
+    labs(y='False-positive error probability',
+         x='Time spent surveying\nthe quadrat (min)') +
+    theme_bw(),
+prediction_empty_cells_3 %>%
+  rename(`Quadrat order`= x,
+         `Botany experience`= group,
+         `p1|0` = predicted) %>%
+  ggplot(aes(x=`Quadrat order`, y=`p1|0`, color = `Botany experience`)) +
+  geom_line() +
+  geom_ribbon(aes(ymin=conf.low, ymax=conf.high, fill=`Botany experience`),  alpha=0.2, colour = NA) +
+  scale_y_continuous(limits = c(0,0.04)) +
+  scale_x_continuous(limits = c(1, 10), breaks = c(1:10)) +
+  annotate("text", x = 1.7, y = 0.039, label = "(c)", size = 4, fontface = 2) +
+  labs(y='False-positive error probability',
+       fill="Botany\nexperience",
+       colour="Botany\nexperience") +
+  theme_bw() +
+  theme(panel.grid.minor.x = element_blank()),
+ncol = 3, common.legend = FALSE, legend = 'bottom', align = "h"
+)
+```

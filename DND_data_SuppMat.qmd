@@ -1,0 +1,979 @@
+---
+title: "Rare but pervasive: false-positive errors bias estimates of fine-scale occupancy probabilities in plant population surveys"
+subtitle: "Supplementary Material"
+date: "Created on the `r format(Sys.time(), '%Y-%m-%d')`"
+header-includes:
+  - \usepackage{longtable}
+  - \usepackage{graphicx}
+  - \usepackage{grffile}
+format:
+  pdf:
+    toc: true
+toc-title: Table of Contents
+always_allow_html: yes
+---
+
+\setcounter{page}{1}
+
+```{=html}
+<style>
+body {
+text-align: justify;
+font-size: 12pt;
+}
+</style>
+```
+
+```{r global_options, include = FALSE}
+# Set global chunk options
+rm(list = ls()) ### to clear namespace
+
+library(knitr)
+
+opts_chunk$set(fig.width = 9, fig.height = 7, fig.align = 'center',
+               echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+```{r, include = FALSE}
+#load packages
+library(tidyverse)
+library(readxl)
+library(readr)
+library(ggplot2)
+library(raster)
+library(spdep)
+library(corrplot)
+library(glmmTMB)
+library(performance)
+library(ggeffects)
+library(broom.mixed)
+library(DHARMa)
+library(sjPlot)
+library(ggpubr)
+library(purrr)
+library(knitr)
+library(kableExtra)
+library(scales)
+library(flextable)
+library(dplyr)
+library(magick)
+```
+
+```{r, include = FALSE}
+#load tables from Occurrence_metric_Analysis_and_Figures
+df_data_cells <- read_delim("saved_tables/df_data_cells.csv", 
+                       delim = ";", escape_double = FALSE, trim_ws = TRUE)
+df_data_quadrat <- read_delim("saved_tables/df_data_quadrat.csv", 
+                       delim = ";", escape_double = FALSE, trim_ws = TRUE)
+df_data_occup_cells_model <- read_delim("saved_tables/df_data_occup_cells_model.csv", 
+                       delim = ";", escape_double = FALSE, trim_ws = TRUE) %>%
+  mutate(edge=as.factor(edge))
+df_data_empty_cells_model <- read_delim("saved_tables/df_data_empty_cells_model.csv", 
+                       delim = ";", escape_double = FALSE, trim_ws = TRUE) %>%
+  mutate(edge=as.factor(edge))
+
+#load tables from simulation analysis
+TABLE <- read_delim("simulation_outputs/ResultSimul_het_psi3_p115.2.csv", 
+                    delim = ";", escape_double = FALSE, trim_ws = TRUE)
+LIST_ESTIM_PSI <- read_delim("simulation_outputs/ResultSimul_het_psi3_p115_list.2.csv", 
+                    delim = ";", escape_double = FALSE, trim_ws = TRUE)
+
+#fit models
+fit_occupied_cells <- glmmTMB::glmmTMB(dnd_of_occupied_cells ~ (1|species) + (1|species:quadrat) + (1|obs_id)
+                   + scale(species_conspicuousness) * habitat_closure
+                   + scale(species_conspicuousness) * scale(count_TRUE)
+                   + scale(species_conspicuousness) * scale(mean_adjacent_count)
+                   + scale(quadrat_order) * scale(exp_bota)
+                   + scale(exp_bota) * scale(count_TRUE)
+                   + scale(mean_adjacent_count) * scale(count_TRUE)
+                   + edge
+                   + scale(counting_time_cells) * scale(count_tot_TRUE)
+                   ,
+                         data = df_data_occup_cells_model, family = binomial(link = "logit"))
+
+fit_empty_cells <- glmmTMB::glmmTMB(dnd_of_empty_cells ~ (1|species) + (1|species:quadrat) + (1|obs_id)
+                   + scale(species_conspicuousness) * habitat_closure
+                   + scale(species_conspicuousness) * scale(mean_adjacent_count)
+                   + scale(quadrat_order) * scale(exp_bota)
+                   + edge
+                   + scale(counting_time_cells) * scale(count_tot_TRUE)
+                   ,
+                         data = df_data_empty_cells_model, family = binomial(link = "logit"))
+```
+
+# Appendix 1: Data visualization
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.height = 4, fig.width = 5}
+df_data_quadrat %>%
+  rename(occupied_cells_num.Observation = occupied_cells_num,
+         count_tot.Observation = count_tot,
+         occupied_cells_num.Truth = occupied_cells_num_TRUE,
+         count_tot.Truth = count_tot_TRUE) %>%
+  pivot_longer(cols=c(occupied_cells_num.Observation, occupied_cells_num.Truth, count_tot.Observation, count_tot.Truth),
+               names_to = 'variable',
+               values_to = 'n') %>%
+  separate(variable,c('variable', 'observer'), sep='\\.') %>%
+  pivot_wider(names_from = variable,
+              values_from = n) %>%
+  mutate(obs_id = case_when({observer == 'Truth'} ~'experimenter',
+                            TRUE ~ obs_id)) %>%
+  dplyr::select(c(species,obs_id,quadrat,observer,occupied_cells_num,count_tot)) %>%
+  unique() %>%
+  ggplot(aes(x=count_tot, y=occupied_cells_num, color = observer))+
+  geom_point()+
+  geom_smooth(aes(fill = observer), method='loess')+
+  geom_abline(slope=1,intercept=0,linetype=2)+
+  scale_color_manual(values=c(Observation='#22A884FF', Truth='#440154FF')) +
+  scale_fill_manual(values=c(Observation='#22A884FF', Truth='#440154FF')) +
+  labs(x='Number of individuals in the quadrat',
+       y='Number of occupied cells in the quadrat',
+      fill="Type of data",
+       colour="Type of data") +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+**Figure S1.1:** Relationship between the number of individuals in a quadrat and the number of cells occupied by the individuals of the quadrat for data from the observers (type of data = observation) and from the experimenter (type of data = truth). On this graph, each dot corresponds to a quadrat observed either by an observer or the experimenter during one of the 30 field sessions. The smooth curves come from a loess regression model fitted separately to the data of both groups. Ribbons indicate the 95% confidence intervals. A dot on the dashed line corresponds to a quadrat in which the number of individuals is equal to the number of occupied cells. <br>
+
+<br>
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.height = 6, fig.width = 6}
+df_data_quadrat %>%
+  dplyr::select(c(species_name, quadrat, occupied_cells_num_TRUE)) %>%
+  unique() %>%
+  mutate(species_name = str_replace(species_name, "_", " ")) %>%
+  ggplot(aes(x=occupied_cells_num_TRUE, y = reorder(species_name, occupied_cells_num_TRUE, FUN = median))) +
+  geom_boxplot(fill = "white", outliers = TRUE) +
+  labs(x='Number of occupied cells in the quadrat', y = 'Species') +
+  theme_bw()
+```
+
+**Figure S1.2:** Number of occupied cells in a quadrat for each species (a species corresponds to a field session). The thick line in a box indicates the median value across all 10 quadrats of a field session, the box goes from the first to the third quartile and the whiskers extend from the minimum to the maximum value within 1.5 times the interquartile range from the box. Dots represent outliers exceeding 1.5 times this range. <br>
+
+<br>
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.height = 6, fig.width = 8}
+ggarrange(
+df_data_occup_cells_model %>%
+  ggplot(aes(x=count_TRUE)) +
+  geom_histogram(fill='white',color='black') +
+  labs(x='Number of individuals in the cell', y='Number of cells', title = 'Occupied cells') +
+  scale_x_continuous(breaks=seq(0,30, by=1)) +
+  annotate("text", x = 31, y = 20000, label = "(a)", size = 5, fontface = 2) +
+  theme_bw(),
+ggarrange(
+df_data_occup_cells_model %>%
+  ggplot(aes(x=mean_adjacent_count)) +
+  geom_histogram(fill='white',color='black') +
+  labs(x='Mean number of individuals\nin adjacent cells', y='Number of cells', title = 'Occupied cells') +
+  annotate("text", x = 15, y = 9500, label = "(b)", size = 5, fontface = 2) +
+  theme_bw(),
+df_data_empty_cells_model %>%
+  ggplot(aes(x=mean_adjacent_count)) +
+  geom_histogram(fill='white',color='black') +
+  labs(x='Mean number of individuals\nin adjacent cells', y='Number of cells', title = 'Unoccupied cells') +
+  annotate("text", x = 14, y = 80000, label = "(c)", size = 5, fontface = 2) +
+  theme_bw(),
+ncol=2),
+nrow=2)
+```
+
+**Figure S1.3:** Distribution of the number of individuals in occupied cells (a) and distribution of the mean number of individuals in adjacent cells of occupied (b) or unoccupied (c) cells for the 300 quadrats of the 30 field sessions (10 quadrats per session). <br>
+
+<br>
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.height = 4, fig.width = 8}
+df_data_occup_cells_model %>%
+  ggplot(aes(x=as.factor(count_TRUE), y=mean_adjacent_count)) +
+  geom_boxplot(notch = TRUE) +
+  labs(x='Number of individuals in the cell', y='Mean number of individuals in adjacent cells') +
+  theme_bw()
+```
+
+**Figure S1.4:** Mean number of individuals in adjacent cells depending on the number of individuals in the cell. On this graph, each dot corresponds to a cell in one of the the 300 quadrats of the 30 field sessions (10 quadrats per session). The thick line in a box indicates the median value of the mean number of individuals in adjacent cells, the box goes from the first to the third quartile and the whiskers extend from the minimum to the maximum value within 1.5 times the interquartile range from the box. Dots represent outliers exceeding 1.5 times this range. The medians of two groups differ if the notches around these medians do not overlap. <br>
+
+<br>
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.height = 6, fig.width = 7}
+ordered_species <- df_data_quadrat %>%
+  filter(!is.na(occupied_cells_num)) %>% #filter out quadrat that were not surveyed
+  group_by(species_name, obs_id) %>%
+  summarise(tot_recall = sum(TP)/sum(occupied_cells_num_TRUE)) %>%
+  mutate(species_name = str_replace(species_name, "_", " ")) %>%
+  group_by(species_name) %>%
+  summarise(med_recall = median(tot_recall)) %>%
+  arrange(desc(med_recall)) %>%
+  pull(species_name) %>% 
+  as.vector()
+
+df_data_quadrat %>%
+  filter(!is.na(occupied_cells_num)) %>% #filter out quadrat that were not surveyed
+  group_by(species_name, obs_id, exp_bota) %>%
+  summarise(tot_recall = sum(TP)/sum(occupied_cells_num_TRUE), tot_specificity = sum(TN)/sum(TN + FP)) %>%
+  mutate(species_name = str_replace(species_name, "_", " ")) %>%
+  pivot_longer(cols=tot_recall:tot_specificity,
+               names_to = "variable",
+               values_to = "values") %>%
+  mutate(variable=case_when({variable == 'tot_recall'} ~ 'Occupied',
+                            TRUE ~'Unoccupied')) %>%
+  mutate(species_name = str_replace(species_name, "_", " ")) %>%
+  mutate(species_name = factor(species_name, ordered = TRUE, levels = rev(ordered_species))) %>%
+  ggplot(aes(x=values, y = species_name, fill = as.factor(exp_bota))) +
+  geom_boxplot(fill = "white", outliers = FALSE) +
+  geom_dotplot(stackdir = 'center', dotsize = 0.9, alpha = 1) +
+  facet_wrap(~variable, scales = "free_x") +
+  scale_x_continuous(labels = label_number(accuracy = 0.01)) +
+  labs(x='Proportion of correctly observed cells per observer', y = 'Species', fill = 'Botany experience') +
+  scale_fill_manual(values = c("#2b83ba", "#abdda4", "#ffffbf", "#fdae61", "#d7191c")) +
+  theme_bw() +
+  theme(panel.spacing=unit(1,"lines"), legend.position = "bottom")
+```
+
+**Figure S1.5:** Proportion of occupied cells (left panel) and unoccupied cells (right panel) that were correctly observed as such by an observer across the 10 quadrats for each species (a species corresponds to a field session). Dots indicate the proportion of occupied or unoccupied cells of all 10 quadrats of a session for which the observer correctly observed the occurrence. The colors indicate the level of experience in botany of the observer (1=least experienced; 5=most experienced). Species are ordered by decreasing median values of the proportion of correctly observed occupied cells. The thick line in a box indicates the median value across all observers of a field session, the box goes from the first to the third quartile and the whiskers extend from the minimum to the maximum value within 1.5 times the interquartile range from the box. <br>
+
+<br>
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.height = 7, fig.width = 14}
+par(mfrow=c(1,2))
+
+df_data_occup_cells_model %>%
+  dplyr::select(c(species_conspicuousness, quadrat_order, exp_bota, habitat_closure, count_TRUE, mean_adjacent_count, counting_time_cells, count_tot_TRUE)) %>%
+  rename(`Species conspicuousness`= species_conspicuousness,
+         `Quadrat order`= quadrat_order,
+         `Botany experience`= exp_bota,
+         `Habitat closure` = habitat_closure,
+         `Number of individuals in the cell`=count_TRUE,
+         `Mean number of individuals in adjacent cells`=mean_adjacent_count,
+         `Time spent surveying the quadrat (min)`=counting_time_cells,
+         `Total number of individuals in the quadrat`=count_tot_TRUE
+         ) %>%
+  na.omit() %>%
+  cor() %>%
+  corrplot.mixed(tl.pos = 'lt')
+
+df_data_empty_cells_model %>%
+  dplyr::select(c(species_conspicuousness, quadrat_order, exp_bota, habitat_closure, mean_adjacent_count, counting_time_cells, count_tot_TRUE)) %>%
+  rename(`Species conspicuousness`= species_conspicuousness,
+         `Quadrat order`= quadrat_order,
+         `Botany experience`= exp_bota,
+         `Habitat closure` = habitat_closure,
+         `Mean number of individuals in adjacent cells`=mean_adjacent_count,
+         `Time spent surveying the quadrat (min)`=counting_time_cells,
+         `Total number of individuals in the quadrat`=count_tot_TRUE
+         ) %>%
+  na.omit() %>%
+  cor() %>%
+  corrplot.mixed(tl.pos = 'lt')
+```
+
+**Figure S1.6:** Correlation matrix showing the correlation coefficients between continuous variables used in general linear mixed models on the detection probability (left panel) and false-positive error probability (right panel). The Pearson correlation index is given for each combination of variables: positive and negative values respectively indicate a positive and negative correlation between two variables. <br>
+
+# Appendix 2: Model goodness-of-fit assessment
+
+We assessed the goodness-of-fit of the models using the R package DHARMa.
+
+## Model on the detection probability
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.height = 7, fig.width = 13}
+simuloutput_occupied_cells <- simulateResiduals(fit_occupied_cells)
+plot(simuloutput_occupied_cells)
+```
+
+**Figure S2.1:** Main residual diagnostic plots of the general linear mixed model on the detection probability: the quantile-quantile plot (left panel) and the residuals against predicted values plot (right panel) are shown. <br>
+
+<br>
+
+The model seems to fit the data very well for this model. Although the KS uniformity test shows a significant deviation, the dispersion test and the outlier test are non-significant, and generally, the residual vs. predicted plot looks nice.
+
+## Model on the false-positive error probability
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.height = 7, fig.width = 13}
+simuloutput_empty_cells <- simulateResiduals(fit_empty_cells)
+plot(simuloutput_empty_cells)
+```
+
+**Figure S2.2:** Main residual diagnostic plots of the general linear mixed model on the false-positive error probability: the quantile-quantile plot (left panel) and the residuals against predicted values plot (right panel) are shown. <br>
+
+<br>
+
+Overall, the model seems to fit the data nicely for this model as well. The KS uniformity test, dispersion test and outlier test are all non-significant.
+
+# Appendix 3: Coefficients of the model
+
+All continuous explanatory variables were standardized before fitting the models. The glmmTMB package was used to fit both models.
+
+## Model on the detection probability
+
+The model used to fit the data from truly occupied cells is the following:
+
+```{r, eval=FALSE, echo=TRUE, message=FALSE, warning=FALSE}
+fit_occupied_cells <- glmmTMB::glmmTMB(dnd_of_occupied_cells ~ (1|species)
+                                       + (1|species:quadrat) + (1|obs_id)
+                   + species_conspicuousness * habitat_closure
+                   + species_conspicuousness * count_TRUE
+                   + species_conspicuousness * mean_adjacent_count
+                   + quadrat_order * exp_bota
+                   + exp_bota * count_TRUE
+                   + mean_adjacent_count * count_TRUE
+                   + edge
+                   + counting_time_cells * count_tot_TRUE
+                   ,
+                         data = df_data_occup_cells_model, 
+                   family = binomial(link = "logit"))
+```
+
+<br>
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# make the table with the betas for the selected model
+df_fit_occupied_cells_betas <- broom.mixed::tidy(fit_occupied_cells, conf.int = TRUE, effects = c("fixed", "ran_pars")) %>%
+  as.data.frame()
+
+# move the columns with the confidence interval to the left
+df_fit_occupied_cells_betas <- df_fit_occupied_cells_betas %>%
+  dplyr::select(c(effect, group:std.error, conf.low, conf.high, statistic, p.value))
+
+# change presentation of random effects
+df_fit_occupied_cells_betas <- df_fit_occupied_cells_betas %>%
+  mutate(effect = case_when({effect == 'ran_pars'} ~'random',
+                            TRUE ~ effect),
+         term = case_when({effect == 'random'} ~ group,
+                          TRUE ~ term)) %>%
+  dplyr::select(-group)
+
+# clean the variable names
+df_fit_occupied_cells_betas <- df_fit_occupied_cells_betas %>%
+  mutate(term = gsub(pattern = "scale(", replacement = "", x = term, fixed = TRUE)) %>%
+  mutate(term = gsub(pattern = ")", replacement = "", x = term, fixed = TRUE)) %>%
+  mutate(term = gsub(pattern = "(", replacement = "", x = term, fixed = TRUE)) %>%
+  mutate(term = gsub(pattern = ":", replacement = " x ", x = term, fixed = TRUE)) %>%
+  mutate(term = gsub(pattern = "_", replacement = " ", x = term, fixed = TRUE)) %>%
+  mutate(term = gsub(pattern = "species conspicuousness", replacement = "Species conspicuousness", x = term, fixed = TRUE)) %>%
+  mutate(term = gsub(pattern = "habitat closure", replacement = "Habitat closure", x = term, fixed = TRUE)) %>%
+  mutate(term = gsub(pattern = "exp bota", replacement = "Botany experience", x = term, fixed = TRUE)) %>%
+  mutate(term = gsub(pattern = "quadrat order", replacement = "Quadrat order", x = term, fixed = TRUE)) %>%
+  mutate(term = gsub(pattern = "count TRUE", replacement = "Number of individuals in the cell", x = term, fixed = TRUE)) %>%
+  mutate(term = gsub(pattern = "mean adjacent count", replacement = "Mean number of individuals in adjacent cells", x = term, fixed = TRUE)) %>%
+  mutate(term = gsub(pattern = "edge1", replacement = "Quadrat edge [1]", x = term, fixed = TRUE)) %>%
+  mutate(term = gsub(pattern = "counting time cells", replacement = "Time spent surveying the quadrat", x = term, fixed = TRUE)) %>%
+  mutate(term = gsub(pattern = "count tot TRUE", replacement = "Number of individuals in the quadrat", x = term, fixed = TRUE))
+
+# make two separate tables for the fixed and the random effects
+df_fit_occupied_cells_betas_random_effects <- df_fit_occupied_cells_betas %>%
+  filter(effect == "random") %>%
+  dplyr::select(-effect)
+
+df_fit_occupied_cells_betas <- df_fit_occupied_cells_betas %>%
+  filter(effect == "fixed") %>%
+  dplyr::select(-effect)
+
+# remove empty columns and show both the variance and the SD of the random effects
+df_fit_occupied_cells_betas_random_effects <- df_fit_occupied_cells_betas_random_effects %>%
+  dplyr::select(c(term,estimate, std.error))
+colnames(df_fit_occupied_cells_betas_random_effects) <- c("term", "SD", "variance")
+df_fit_occupied_cells_betas_random_effects <- df_fit_occupied_cells_betas_random_effects %>%
+  mutate(variance = SD^2) %>%
+  mutate(term = case_when({term == 'species x quadrat'} ~'species:quadrat_id',
+                        {term == 'obs id'} ~'obs_id',
+                        TRUE ~term))
+```
+
+<br>
+
+**Table S3.1:** Fixed effect coefficients of the model on the detection probability. The estimate of a term corresponds to the average change in the log-odds of the detection probability when the value of the term increases of one unit. The standard error (std.error), along with the lowest and highest values of the 95% confidence interval (conf.low and conf.high) indicate the variability of the estimate. The statistic corresponds to the z value, obtained by dividing the estimate by the standard error. The *p*-value indicates whether or not the effect of a term is statistically significant (we set the significance level to 0.05). <br>
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# print the table
+table <- flextable(df_fit_occupied_cells_betas) %>%
+  theme_vanilla() %>%
+  align_text_col(align ='left') %>%
+  align_nottext_col(align = "right") %>%
+  colformat_double(digits = 4) %>%
+  width(width = c(1.5,0.7,0.7,0.7,0.7,0.7,0.7))
+table
+```
+
+<br>
+
+**Table S3.2:** Random effect standard deviations and variances of the model on the detection probability. <br>
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# print the table
+table <- flextable(df_fit_occupied_cells_betas_random_effects) %>%
+  theme_vanilla() %>%
+  align_text_col(align = "left") %>%
+  align_nottext_col(align = "right") %>%
+  colformat_double(digits = 4) %>%
+  autofit()
+table
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+performance::r2(fit_occupied_cells)
+```
+
+## Model on the false-positive error probability
+
+The model used to fit the data from truly unoccupied cells is the following:
+
+```{r, eval=FALSE, echo=TRUE, message=FALSE, warning=FALSE}
+fit_empty_cells <- glmmTMB::glmmTMB(dnd_of_empty_cells ~ (1|species) 
+                                    + (1|species:quadrat) + (1|obs_id)
+                   + species_conspicuousness * habitat_closure
+                   + species_conspicuousness * mean_adjacent_count
+                   + quadrat_order * exp_bota
+                   + edge
+                   + counting_time_cells * count_tot_TRUE
+                   ,
+                         data = df_data_empty_cells_model, 
+                   family = binomial(link = "logit"))
+```
+
+<br>
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# make the table with the betas for the selected model
+df_fit_empty_cells_betas <- broom.mixed::tidy(fit_empty_cells, conf.int = TRUE, effects = c("fixed", "ran_pars")) %>%
+  as.data.frame()
+
+# move the columns with the confidence interval to the left
+df_fit_empty_cells_betas <- df_fit_empty_cells_betas %>%
+  dplyr::select(c(effect, group:std.error, conf.low, conf.high, statistic, p.value))
+
+# change presentation of random effects
+df_fit_empty_cells_betas <- df_fit_empty_cells_betas %>%
+  mutate(effect = case_when({effect == 'ran_pars'} ~'random',
+                            TRUE ~ effect),
+         term = case_when({effect == 'random'} ~ group,
+                          TRUE ~ term)) %>%
+  dplyr::select(-group)
+
+# clean the variable names
+df_fit_empty_cells_betas <- df_fit_empty_cells_betas %>%
+  mutate(term = gsub(pattern = "scale(", replacement = "", x = term, fixed = TRUE)) %>%
+  mutate(term = gsub(pattern = ")", replacement = "", x = term, fixed = TRUE)) %>%
+  mutate(term = gsub(pattern = "(", replacement = "", x = term, fixed = TRUE)) %>%
+  mutate(term = gsub(pattern = ":", replacement = " x ", x = term, fixed = TRUE)) %>%
+  mutate(term = gsub(pattern = "_", replacement = " ", x = term, fixed = TRUE)) %>%
+  mutate(term = gsub(pattern = "species conspicuousness", replacement = "Species conspicuousness", x = term, fixed = TRUE)) %>%
+  mutate(term = gsub(pattern = "habitat closure", replacement = "Habitat closure", x = term, fixed = TRUE)) %>%
+  mutate(term = gsub(pattern = "exp bota", replacement = "Botany experience", x = term, fixed = TRUE)) %>%
+  mutate(term = gsub(pattern = "quadrat order", replacement = "Quadrat order", x = term, fixed = TRUE)) %>%
+  mutate(term = gsub(pattern = "mean adjacent count", replacement = "Mean number of individuals in adjacent cells", x = term, fixed = TRUE)) %>%
+  mutate(term = gsub(pattern = "edge1", replacement = "Quadrat edge [1]", x = term, fixed = TRUE)) %>%
+  mutate(term = gsub(pattern = "counting time cells", replacement = "Time spent surveying the quadrat", x = term, fixed = TRUE)) %>%
+  mutate(term = gsub(pattern = "count tot TRUE", replacement = "Number of individuals in the quadrat", x = term, fixed = TRUE))
+
+# make two separate tables for the fixed and the random effects
+df_fit_empty_cells_betas_random_effects <- df_fit_empty_cells_betas %>%
+  filter(effect == "random") %>%
+  dplyr::select(-effect)
+
+df_fit_empty_cells_betas <- df_fit_empty_cells_betas %>%
+  filter(effect == "fixed") %>%
+  dplyr::select(-effect)
+
+# remove empty columns and show both the variance and the SD of the random effects
+df_fit_empty_cells_betas_random_effects <- df_fit_empty_cells_betas_random_effects %>%
+  dplyr::select(c(term,estimate, std.error))
+colnames(df_fit_empty_cells_betas_random_effects) <- c("term", "SD", "variance")
+df_fit_empty_cells_betas_random_effects <- df_fit_empty_cells_betas_random_effects %>%
+  mutate(variance = SD^2) %>%
+  mutate(term = case_when({term == 'species x quadrat'} ~ 'species:quadrat_id',
+                          {term == 'obs id'} ~'obs_id',
+                          TRUE ~ term))
+```
+
+<br>
+
+**Table S3.3:** Fixed effect coefficients of the model on the false-positive error probability. The estimate of a term corresponds to the average change in the log-odds of the false-positive error probability when the value of the term increases of one unit. The standard error (std.error), along with the lowest and highest values of the 95% confidence interval (conf.low and conf.high) indicate the variability of the estimate. The statistic corresponds to the z value, obtained by dividing the estimate by the standard error. The *p*-value indicates whether or not the effect of a term is statistically significant (we set the significance level to 0.05). <br>
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# print the table
+table <- flextable(df_fit_empty_cells_betas) %>%
+  theme_vanilla() %>%
+  align_text_col(align ='left') %>%
+  align_nottext_col(align = "right") %>%
+  colformat_double(digits = 4) %>%
+  width(width = c(1.5,0.7,0.7,0.7,0.7,0.7,0.7))
+table
+```
+
+<br>
+
+**Table S3.4:** Random effect standard deviations and variances of the model on the false-positive error probability. <br>
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# print the table
+table <- flextable(df_fit_empty_cells_betas_random_effects) %>%
+  theme_vanilla() %>%
+  align_text_col(align = "left") %>%
+  align_nottext_col(align = "right") %>%
+  colformat_double(digits = 4) %>%
+  autofit()
+table
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+performance::r2(fit_empty_cells)
+```
+
+## Coefficients of variables for both models
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.height = 7, fig.width = 7}
+plot_models(fit_empty_cells, fit_occupied_cells,
+            p.shape = T,
+            transform = NULL,
+            axis.title = 'Log-Odds',
+            p.threshold = c(0.05),
+            show.legend = FALSE,
+            vline.color = 'black',
+            axis.labels = rev(c('Species conspicuousness',
+                            'Habitat closure',
+                            'Mean number of individuals in adjacent cells',
+                            'Quadrat order',
+                            'Botany experience',
+                            'Quadrat edge [1]',
+                            'Time spent surveying the quadrat',
+                            'Number of individuals in the quadrat',
+                            'Species conspicuousness x Habitat closure',
+                            'Species conspicuousness x Mean number of individuals in adjacent cells',
+                            'Quadrat order x Botany experience',
+                            'Time spent surveying the quadrat x Number of individuals in the quadrat',
+                            'Number of individuals in the cell',
+                            'Species conspicuousness x Number of individuals in the cell',
+                            'Botany experience x Number of individuals in the cell',
+                            'Mean number of individuals in adjacent cells x Number of individuals in the cell')),
+            m.labels = c('FPE probability','Detection probability'),
+            grid = TRUE
+            ) +
+  theme_bw() +
+  scale_y_continuous(limits = c(-1, 1.5))
+```
+
+**Figure S3.1:** Estimated coefficients of standardized variables used to predict the detection probability and the false-positive error (FPE) probability in the general linear mixed models. Log-Odd values estimated for the variables used in the models for the detection probability and FPE probability are represented by red and blue dots respectively. Full dots indicate a significant effect (*p*-value \> 0.05) and empty dots indicate a non-significant effect. The 95% confidence interval of a coefficient is represented by a horizontal line. <br>
+
+# Appendix 4: Alternative predictions from the models
+
+The following figures are similar to Fig. 1, 2 and 3 from the main text, except we modified the values of the variables that are held constant. In the main text, the variables are fixed at a the median value; here we will plot predictions for extreme scenarios, e.g. with conditions supposed to maximize or minimize detection and false-positive error probabilities. The best-case scenario is the one expected to maximize the detection probability and minimize the false-positive error probability. For ordinal variables, we take the lowest or highest value of the variable, while for continuous variables, we use the value of the first or third quantile, depending on the scenario. To avoid unrealistic scenarios in which the counting time was very high but the number of individuals in the quadrat was very low, or vice-versa, both these variables had the same values for both best- and worst-case scenarios.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.height = 6, fig.width = 9}
+prediction_occupied_cells_1_best <- predict_response(fit_occupied_cells, terms = c('count_TRUE [1:10]', 'exp_bota', 'habitat_closure[-1.5,0.5,2.5]', 'species_conspicuousness[1,4]'), condition = c(quadrat_order = 10, mean_adjacent_count= 2, edge = 0, counting_time_cells = 380, count_tot_TRUE = 32), type = 'fixed')
+
+prediction_occupied_cells_1_worst <- predict_response(fit_occupied_cells, terms = c('count_TRUE [1:10]', 'exp_bota', 'habitat_closure[-1.5,0.5,2.5]', 'species_conspicuousness[1,4]'), condition = c(quadrat_order = 1, mean_adjacent_count= 0.3, edge = 1, counting_time_cells = 380, count_tot_TRUE = 32), type = 'fixed')
+
+#Fig 1
+ggarrange(
+prediction_occupied_cells_1_best %>%
+  rename(`Number of individuals in the cell`= x,
+         `Species conspicuousness`= panel,
+         `Botany experience`= group,
+         `Habitat closure`= facet,
+         `p1|1` = predicted) %>%
+ggplot(aes(x=`Number of individuals in the cell`,y=`p1|1`, color=`Botany experience`)) +
+  geom_line() +
+  geom_ribbon(aes(ymin=conf.low, ymax=conf.high, fill=`Botany experience`),  alpha=0.2, colour = NA) +
+  facet_grid(`Habitat closure`~`Species conspicuousness`, labeller = purrr::partial(label_both, sep = " = ")) +
+  scale_y_continuous(limits = c(0.1, 1)) +
+  scale_x_continuous(limits = c(1, 10), breaks = c(1:10)) +
+  labs(title = 'Best-case scenario for detection',
+       y='Cell detection probability (p1|1)') +
+  theme_bw() +
+  theme(panel.grid.minor.x = element_blank(),
+        panel.grid.major.y = element_line( size=.1, color="grey" ),
+        legend.position="bottom"),
+prediction_occupied_cells_1_worst %>%
+  rename(`Number of individuals in the cell`= x,
+         `Species conspicuousness`= panel,
+         `Botany experience`= group,
+         `Habitat closure`= facet,
+         `p1|1` = predicted) %>%
+ggplot(aes(x=`Number of individuals in the cell`,y=`p1|1`, color=`Botany experience`)) +
+  geom_line() +
+  geom_ribbon(aes(ymin=conf.low, ymax=conf.high, fill=`Botany experience`),  alpha=0.2, colour = NA) +
+  facet_grid(`Habitat closure`~`Species conspicuousness`, labeller = purrr::partial(label_both, sep = " = ")) +
+  scale_y_continuous(limits = c(0.05, 1)) +
+  scale_x_continuous(limits = c(1, 10), breaks = c(1:10)) +
+  labs(title = 'Worst-case scenario for detection',
+       y='Cell detection probability (p1|1)') +
+  theme_bw() +
+  theme(panel.grid.minor.x = element_blank(),
+        panel.grid.major.y = element_line( size=.1, color="grey" ),
+        legend.position="bottom"),
+ncol=2, common.legend = TRUE, legend = 'bottom')
+```
+
+**Figure S4.1 - Predicted detection probability for the best- (left panel) and the worst-case (right panel) scenario** depending on the number of individuals in the cell, the habitat closure (-1.5=most open habitats; 2.5=most closed habitats), the species conspicuousness (1=least conspicuous; 4=most conspicuous) and the experience in botany of the observer (1=least experienced; 5=most experienced). The other variables are fixed at the following levels: for the best-case scenario: quadrat order = 10, mean number of individuals in adjacent cells = 2, quadrat edge = 0, time spent surveying the quadrat = 6.3 minutes, total number of individuals in the quadrat = 32; for the worst-case scenario: quadrat order = 1, mean number of individuals in adjacent cells = 0.3, quadrat edge = 1, time spent surveying the quadrat = 6.3 minutes, total number of individuals in the quadrat = 32. Lines show the predicted mean detection probability, and ribbons represent the 95% confidence intervals. <br>
+
+<br>
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.height = 8, fig.width = 9}
+prediction_occupied_cells_2_best <- predict_response(fit_occupied_cells, terms = c('count_TRUE [1:10]', 'mean_adjacent_count [0,2,4]'), condition = c(species_conspicuousness = 4, habitat_closure = -1.5, quadrat_order = 10, exp_bota = 5, edge = 0, counting_time_cells = 380, count_tot_TRUE = 32), type = 'fixed')
+
+prediction_occupied_cells_2_worst <- predict_response(fit_occupied_cells, terms = c('count_TRUE [1:10]', 'mean_adjacent_count [0,2,4]'), condition = c(species_conspicuousness = 1, habitat_closure = 2.5, quadrat_order = 1, exp_bota = 1, edge = 1, counting_time_cells = 380, count_tot_TRUE = 32), type = 'fixed')
+
+prediction_occupied_cells_3_best <- predict_response(fit_occupied_cells, terms = c('counting_time_cells[all]'), condition = c(species_conspicuousness = 4, habitat_closure = -1.5, count_TRUE = 3, mean_adjacent_count = 2, quadrat_order = 10, exp_bota = 5, edge = 0, count_tot_TRUE = 32), type = 'fixed')
+
+prediction_occupied_cells_3_worst <- predict_response(fit_occupied_cells, terms = c('counting_time_cells[all]'), condition = c(species_conspicuousness = 1, habitat_closure = 2.5, count_TRUE = 1, mean_adjacent_count = 0.3, quadrat_order = 1, exp_bota = 1, edge = 1, count_tot_TRUE = 32), type = 'fixed')
+
+prediction_occupied_cells_4_best <- predict_response(fit_occupied_cells, terms = c('quadrat_order[1:10]','exp_bota'), condition = c(species_conspicuousness = 4, habitat_closure = -1.5, count_TRUE = 3, mean_adjacent_count = 2, edge = 0, counting_time_cells = 380, count_tot_TRUE = 32), type = 'fixed')
+
+prediction_occupied_cells_4_worst <- predict_response(fit_occupied_cells, terms = c('quadrat_order[1:10]','exp_bota'), condition = c(species_conspicuousness = 1, habitat_closure = 2.5, count_TRUE = 1, mean_adjacent_count = 0.3, edge = 1, counting_time_cells = 380, count_tot_TRUE = 32), type = 'fixed')
+
+#Fig 2
+ggarrange(
+ggarrange(
+prediction_occupied_cells_2_best %>%
+    rename(`Number of individuals in the cell`= x,
+         `Mean number of individuals in adjacent cells`= group,
+         `p1|1` = predicted) %>%
+ggplot(aes(x=`Number of individuals in the cell`, y=`p1|1`, color = `Mean number of individuals in adjacent cells`)) +
+  geom_line() +
+  geom_ribbon(aes(ymin=conf.low, ymax=conf.high, fill=`Mean number of individuals in adjacent cells`),  alpha=0.2, colour = NA) +
+  scale_y_continuous(limits = c(0, 1.05), breaks = c(0, 0.25,0.5,0.75,1)) +
+  scale_x_continuous(limits = c(1, 10), breaks = c(1:10)) +
+  scale_color_manual(values=c('0'='orange','2'='red','4'='purple')) +
+  scale_fill_manual(values=c('0'='orange','2'='red','4'='purple')) +
+  annotate("text", x = 1.5, y = 1.05, label = "(a)", size = 4, fontface = 2) +
+  labs(y='Cell detection probability',
+       x='Number of individuals\nin the cell',
+       fill="Mean number of\nindividuals\nin adjacent cells",
+       colour="Mean number of\nindividuals\nin adjacent cells") +
+  theme_bw(),
+prediction_occupied_cells_3_best %>%
+  filter(x<=20*60) %>% #only keeping under 20mins
+    rename(`Time spent surveying the quadrat (min)`= x,
+           `p1|1` = predicted) %>%
+    ggplot(aes(x=`Time spent surveying the quadrat (min)`/60, y=`p1|1`)) +
+    geom_line() +
+    geom_ribbon(aes(ymin=conf.low, ymax=conf.high),  alpha=0.2, colour = NA) +
+    scale_y_continuous(limits = c(0, 1.05), breaks = c(0, 0.25,0.5,0.75,1)) +
+    scale_x_continuous(limits = c(0, 20)) +
+    annotate("text", x = 1.5, y = 1.05, label = "(b)", size = 4, fontface = 2) +
+    labs(y='Cell detection probability',
+         x='Time spent surveying\nthe quadrat (min)') +
+    theme_bw(),
+prediction_occupied_cells_4_best %>%
+    rename(`Quadrat order`= x,
+         `Botany experience`= group,
+         `p1|1` = predicted) %>%
+ggplot(aes(x=`Quadrat order`, y=`p1|1`, color = `Botany experience`)) +
+  geom_line() +
+  geom_ribbon(aes(ymin=conf.low, ymax=conf.high, fill=`Botany experience`),  alpha=0.2, colour = NA) +
+  scale_y_continuous(limits = c(0, 1.05), breaks = c(0, 0.25,0.5,0.75,1)) +
+  scale_x_continuous(limits = c(1, 10), breaks = c(1:10)) +
+  annotate("text", x = 1.5, y = 1.05, label = "(c)", size = 4, fontface = 2) +
+  labs(y='Cell detection probability',
+       fill="Botany\nexperience",
+       colour="Botany\nexperience") +
+  theme_bw(),
+ncol = 3, common.legend = FALSE, legend = 'none', align = "h"
+) %>%
+  annotate_figure(top = text_grob("Best-case scenario for detection", 
+               size = 14)),
+ggarrange(
+prediction_occupied_cells_2_worst %>%
+    rename(`Number of individuals in the cell`= x,
+         `Mean number of individuals in adjacent cells`= group,
+         `p1|1` = predicted) %>%
+ggplot(aes(x=`Number of individuals in the cell`, y=`p1|1`, color = `Mean number of individuals in adjacent cells`)) +
+  geom_line() +
+  geom_ribbon(aes(ymin=conf.low, ymax=conf.high, fill=`Mean number of individuals in adjacent cells`),  alpha=0.2, colour = NA) +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_x_continuous(limits = c(1, 10), breaks = c(1:10)) +
+  scale_color_manual(values=c('0'='orange','2'='red','4'='purple')) +
+  scale_fill_manual(values=c('0'='orange','2'='red','4'='purple')) +
+  annotate("text", x = 1.5, y = 0.98, label = "(d)", size = 4, fontface = 2) +
+  labs(y='Cell detection probability',
+       x='Number of individuals\nin the cell',
+       fill="Mean number of\nindividuals\nin adjacent cells",
+       colour="Mean number of\nindividuals\nin adjacent cells") +
+  theme_bw(),
+prediction_occupied_cells_3_worst %>%
+  filter(x<=20*60) %>% #only keeping under 20mins
+    rename(`Time spent surveying the quadrat (min)`= x,
+           `p1|1` = predicted) %>%
+    ggplot(aes(x=`Time spent surveying the quadrat (min)`/60, y=`p1|1`)) +
+    geom_line() +
+    geom_ribbon(aes(ymin=conf.low, ymax=conf.high),  alpha=0.2, colour = NA) +
+    scale_y_continuous(limits = c(0, 1)) +
+    scale_x_continuous(limits = c(0, 20)) +
+    annotate("text", x = 1.5, y = 0.98, label = "(e)", size = 4, fontface = 2) +
+    labs(y='Cell detection probability',
+         x='Time spent surveying\nthe quadrat (min)') +
+    theme_bw(),
+prediction_occupied_cells_4_worst %>%
+    rename(`Quadrat order`= x,
+         `Botany experience`= group,
+         `p1|1` = predicted) %>%
+ggplot(aes(x=`Quadrat order`, y=`p1|1`, color = `Botany experience`)) +
+  geom_line() +
+  geom_ribbon(aes(ymin=conf.low, ymax=conf.high, fill=`Botany experience`),  alpha=0.2, colour = NA) +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_x_continuous(limits = c(1, 10), breaks = c(1:10)) +
+  annotate("text", x = 1.5, y = 0.98, label = "(f)", size = 4, fontface = 2) +
+  labs(y='Cell detection probability',
+       fill="Botany\nexperience",
+       colour="Botany\nexperience") +
+  theme_bw(),
+ncol = 3, common.legend = FALSE, legend = 'bottom', align = "h"
+) %>%
+  annotate_figure(top = text_grob("Worst-case scenario for detection", 
+               size = 14)),
+nrow = 2, common.legend = FALSE, legend = 'bottom', align = 'v'
+)
+```
+
+**Figure S4.2 - Predicted detection probability for the best- (a, b, c) and worst-case (d, e, f) scenario** depending on (a-d) the number of individuals in the cell and the mean number of individuals in adjacent cells, (b-e) the time an observer spent surveying the quadrat and (c-f) the order in which the observer surveyed the quadrat, for a botany experience from 1 (least experienced) to 5 (most experienced). The other variables are fixed at the following levels: for the best-case scenario: species conspicuousness = 4, habitat closure = -1.5, quadrat order = 10, botany experience = 5, quadrat edge = 0, number of individuals in the cell = 3, mean number of individuals in adjacent cells = 2, time spent surveying the quadrat = 6.3 minutes, total number of individuals in the quadrat = 32; for the worst-case scenario: species conspicuousness = 1, habitat closure = 2.5, quadrat order = 1, botany experience = 1, edge = 1, number of individuals in the cell = 1, mean number of individuals in adjacent cells = 0.3, time spent surveying the quadrat = 6.3 minutes, total number of individuals in the quadrat = 32. Lines show the mean predicted detection probability, and ribbons represent the 95% confidence intervals. <br>
+
+<br>
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.height = 8, fig.width = 9}
+prediction_empty_cells_1_best <- predict_response(fit_empty_cells, terms = c('mean_adjacent_count [all]'), condition = c(species_conspicuousness = 1, habitat_closure = 2.5, exp_bota = 5, quadrat_order = 10, edge = 0, counting_time_cells = 380, count_tot_TRUE = 32), type = 'fixed')
+
+prediction_empty_cells_1_worst <- predict_response(fit_empty_cells, terms = c('mean_adjacent_count [all]'), condition = c(species_conspicuousness = 4, habitat_closure = -1.5, exp_bota = 1, quadrat_order = 1, edge = 1, counting_time_cells = 380, count_tot_TRUE = 32), type = 'fixed')
+
+prediction_empty_cells_2_best <- predict_response(fit_empty_cells, terms = c('counting_time_cells[all]'), condition = c(species_conspicuousness = 1, habitat_closure = 2.5, mean_adjacent_count = 0, quadrat_order = 10, exp_bota = 5, edge = 0, count_tot_TRUE = 32), type = 'fixed')
+
+prediction_empty_cells_2_worst <- predict_response(fit_empty_cells, terms = c('counting_time_cells[all]'), condition = c(species_conspicuousness = 4, habitat_closure = -1.5, mean_adjacent_count = 0.3, quadrat_order = 1, exp_bota = 1, edge = 1, count_tot_TRUE = 32), type = 'fixed')
+
+prediction_empty_cells_3_best <- predict_response(fit_empty_cells, terms = c('quadrat_order[1:10]','exp_bota'), condition = c(species_conspicuousness = 1, habitat_closure = 2.5,  mean_adjacent_count = 0, edge = 0, counting_time_cells = 380, count_tot_TRUE = 32), type = 'fixed')
+
+prediction_empty_cells_3_worst  <- predict_response(fit_empty_cells, terms = c('quadrat_order[1:10]','exp_bota'), condition = c(species_conspicuousness = 4, habitat_closure = -1.5,  mean_adjacent_count = 0.3, edge = 1, counting_time_cells = 380, count_tot_TRUE = 32), type = 'fixed')
+
+#Fig 3
+ggarrange(
+ggarrange(
+prediction_empty_cells_1_best %>%
+  rename(`Mean number of individuals in adjacent cells`= x,
+         `p1|0` = predicted) %>%
+  ggplot(aes(x=`Mean number of individuals in adjacent cells`, y=`p1|0`)) +
+  geom_line() +
+  geom_ribbon(aes(ymin=conf.low, ymax=conf.high),  alpha=0.2, colour = NA) +
+  coord_cartesian(ylim=c(0,0.05), xlim=c(0,2)) +
+  labs(y='False-positive error probability',
+       x='Mean number of individuals\nin adjacent cells') +
+  scale_x_continuous(breaks=seq(0,2,by=.5)) +
+  annotate("text", x = 0.15, y = 0.05, label = "(a)", size = 4, fontface = 2) +
+  theme_bw(),
+prediction_empty_cells_2_best %>%
+  filter(x<=20*60) %>%
+    rename(`Time spent surveying the quadrat (min)`= x,
+           `p1|0` = predicted) %>%
+    ggplot(aes(x=`Time spent surveying the quadrat (min)`/60, y=`p1|0`)) +
+    geom_line() +
+    geom_ribbon(aes(ymin=conf.low, ymax=conf.high),  alpha=0.2, colour = NA) +
+    scale_y_continuous(limits = c(0,0.05)) +
+    scale_x_continuous(limits = c(0, 20)) +
+    annotate("text", x = 1.5, y = 0.05, label = "(b)", size = 4, fontface = 2) +
+    labs(y='False-positive error probability',
+         x='Time spent surveying\nthe quadrat (min)') +
+    theme_bw(),
+prediction_empty_cells_3_best %>%
+  rename(`Quadrat order`= x,
+         `Botany experience`= group,
+         `p1|0` = predicted) %>%
+  ggplot(aes(x=`Quadrat order`, y=`p1|0`, color = `Botany experience`)) +
+  geom_line() +
+  geom_ribbon(aes(ymin=conf.low, ymax=conf.high, fill=`Botany experience`),  alpha=0.2, colour = NA) +
+  scale_y_continuous(limits = c(0,0.05)) +
+  scale_x_continuous(limits = c(1, 10), breaks = c(1:10)) +
+  annotate("text", x = 1.7, y = 0.05, label = "(c)", size = 4, fontface = 2) +
+  labs(y='False-positive error probability',
+       fill="Botany\nexperience",
+       colour="Botany\nexperience") +
+  theme_bw() +
+  theme(panel.grid.minor.x = element_blank()),
+ncol = 3, common.legend = FALSE, legend = 'none', align = "h"
+) %>%
+  annotate_figure(top = text_grob("Best-case scenario for detection", 
+               size = 14)),
+ggarrange(
+prediction_empty_cells_1_worst %>%
+  rename(`Mean number of individuals in adjacent cells`= x,
+         `p1|0` = predicted) %>%
+  ggplot(aes(x=`Mean number of individuals in adjacent cells`, y=`p1|0`)) +
+  geom_line() +
+  geom_ribbon(aes(ymin=conf.low, ymax=conf.high),  alpha=0.2, colour = NA) +
+  coord_cartesian(ylim=c(0,0.05), xlim=c(0,2)) +
+  labs(y='False-positive error probability',
+       x='Mean number of individuals\nin adjacent cells') +
+  scale_x_continuous(breaks=seq(0,2,by=.5)) +
+  annotate("text", x = 0.15, y = 0.05, label = "(d)", size = 4, fontface = 2) +
+  theme_bw(),
+prediction_empty_cells_2_worst %>%
+  filter(x<=20*60) %>%
+    rename(`Time spent surveying the quadrat (min)`= x,
+           `p1|0` = predicted) %>%
+    ggplot(aes(x=`Time spent surveying the quadrat (min)`/60, y=`p1|0`)) +
+    geom_line() +
+    geom_ribbon(aes(ymin=conf.low, ymax=conf.high),  alpha=0.2, colour = NA) +
+    scale_y_continuous(limits = c(0,0.05)) +
+    scale_x_continuous(limits = c(0, 20)) +
+    annotate("text", x = 1.5, y = 0.05, label = "(e)", size = 4, fontface = 2) +
+    labs(y='False-positive error probability',
+         x='Time spent surveying\nthe quadrat (min)') +
+    theme_bw(),
+prediction_empty_cells_3_worst %>%
+  rename(`Quadrat order`= x,
+         `Botany experience`= group,
+         `p1|0` = predicted) %>%
+  ggplot(aes(x=`Quadrat order`, y=`p1|0`, color = `Botany experience`)) +
+  geom_line() +
+  geom_ribbon(aes(ymin=conf.low, ymax=conf.high, fill=`Botany experience`),  alpha=0.2, colour = NA) +
+  scale_y_continuous(limits = c(0,0.05)) +
+  scale_x_continuous(limits = c(1, 10), breaks = c(1:10)) +
+  annotate("text", x = 1.7, y = 0.05, label = "(f)", size = 4, fontface = 2) +
+  labs(y='False-positive error probability',
+       fill="Botany\nexperience",
+       colour="Botany\nexperience") +
+  theme_bw() +
+  theme(panel.grid.minor.x = element_blank()),
+ncol = 3, common.legend = TRUE, legend = 'bottom', align = "h"
+) %>%
+  annotate_figure(top = text_grob("Worst-case scenario for detection", 
+               size = 14)),
+nrow = 2)
+```
+
+**Figure S4.3 - Predicted FPE probability for best- (a, b, c) and worst-case (d, e, f) scenario** depending on (a, d) the mean number of individuals in adjacent cells, (b, e) the time an observer spent surveying the quadrat and (c, f) the order in which the observer surveyed the quadrat, for a botany experience from 1 (least experienced) to 5 (most experience). The other variables are fixed at the following levels: for the best-case scenario: species conspicuousness = 1, habitat closure = 2.5, quadrat order = 10, botany experience = 5, quadrat edge = 0, mean number of individuals in adjacent cells = 0, time spent surveying the quadrat = 6.3 minutes, total number of individuals in the quadrat = 32; for the worst-case scenario: species conspicuousness = 4, habitat closure = -1.5, quadrat order = 1, botany experience = 1, edge = 1, mean number of individuals in adjacent cells = 0.3, time spent surveying the quadrat = 6.3 minutes, total number of individuals in the quadrat = 32. Lines show the mean predicted FPE probability, and ribbons represent the 95% confidence intervals.<br>
+
+<br>
+
+# Appendix 5: Simulation analysis
+
+```{r, echo = FALSE, fig.height = 4, fig.width = 7}
+image_read("pictures/Occupancy_model.png") %>% 
+  image_ggplot(interpolate = TRUE)
+```
+
+**Figure S5.1 - Model describing the observation of a cell with a detection probability p1\|1 and a FPE p1\|0.**
+
+The code used to simulate data as well as the model used to fit the data are given hereafter. The complete R code for simulation analysis can be found on the github (penser à mettre le lien ici).
+
+```{r, eval=FALSE, echo=TRUE, message=FALSE, warning=FALSE}
+# FUNCTION TO SIMULATE DATA
+sim.data <- function(psi = true_psi, psi_sd = true_psi/3,
+                     p11 = true_p11, p11_sd = true_p11/10, p10 = true_p10,
+                     nquadrats = 20, ncells = 100,
+                     k = 3) { #k is number of replicates per site
+  lpsi <- rnorm(nquadrats, mean = psi, sd = psi_sd) #list of psi for each
+  #of the 20 quadrats
+  lp11 <- rnorm(nquadrats, mean = p11, sd = p11_sd) #list of p1|1 for each
+  #of the 20 quadrats
+  for (a in 1:nquadrats) {
+    if (lpsi[a] < 0) {lpsi[a] <- 0}
+    if (lpsi[a]>1) {lpsi[a] <- 1}
+    if (lp11[a] < 0) {lp11[a] <- 0}
+    if (lp11[a]>1) {lp11[a] <- 1}
+  }
+  z <- array(0,dim=c(nquadrats,ncells)) #presence (1) or absence (0)
+  mu <- array(0,dim=c(nquadrats,ncells)) #'binomial' parameter, conditional
+  #on site occupancy status
+  y <- array(0,dim=c(nquadrats,ncells)) #detection (1) non-detection (0)
+  for (i in 1:nquadrats) {
+    z[i,] <- rbinom(ncells,1,lpsi[i])
+    for (j in 1:ncells) {
+      mu[i,j] <- (1-z[i,j])*p10 + z[i,j]*lp11[i]
+      y[i,j] <- rbinom(1,k,mu[i,j]) #size = k for all 3 visits
+    }
+  }
+  return(list(z=z, mu=mu, y=y, k=k, nquadrats=nquadrats, ncells=ncells))
+}
+```
+
+```{r, eval=FALSE, echo=TRUE, message=FALSE, warning=FALSE}
+# MODEL
+modelString = "
+model{
+  for(i in 1:nquadrats){  # Loop through quadrats
+    # Likelihood
+    for(j in 1:ncells) { # Loop through cells
+      z[i, j] ~ dbern(psi[i])
+      # Observation model
+      mu[i,j] <- z[i, j]*p11[i]
+      y[i, j] ~ dbin(mu[i,j], k)
+    }
+    
+    # Priors for Psi (quadrat level)
+    lpsi[i] ~ dnorm(mu.lpsi, tau.lpsi)
+    psi[i] <- ilogit(lpsi[i])
+    
+    #Detection heterogeneity:
+    # Priors for p1|1 (quadrat level)
+    lp11[i] ~ dnorm(mu.lp11, tau.lp11)
+    p11[i] <- ilogit(lp11[i])
+    
+  }
+  
+  # Hyperpriors for psi (mean across all quadrats)
+  psi.mean ~ dunif(0.01,1) #dbeta(1, 1)
+  mu.lpsi <- logit(psi.mean)
+  sd.lpsi ~ dunif(0, 5)
+  tau.lpsi <- 1/sd.lpsi^2
+  
+  # Hyperpriors for p1|1 (mean across all quadrats)
+  p11.mean ~ dunif(0.01,1) #dbeta(1, 1)
+  mu.lp11 <- logit(p11.mean)
+  sd.lp11 ~ dunif(0, 5)
+  tau.lp11 <- 1/sd.lp11^2
+}
+"
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.height = 4, fig.width = 8}
+LIST_ESTIM_PSI %>% 
+  as.data.frame() %>%
+  pivot_longer(cols = !starts_with('true'), names_to = 'run', values_to = 'estim_psi') %>%
+  mutate(bias_psi = estim_psi - true_psi) %>%
+  mutate(bias_psi_prop = 100*(bias_psi)/true_psi) %>%
+  mutate(true_psi = as.factor(true_psi),
+         true_p11 = as.factor(true_p11),
+         true_p10 = as.factor(true_p10)) %>%
+  rename('psi' = true_psi,
+         'p1|1' = true_p11,
+         'p1|0' = true_p10,
+         'psi bias (%)' = bias_psi_prop) %>%
+  ggplot(aes(y=`psi bias (%)`, x=`p1|0`))+ # x=paste(true_psi,true_p11,true_p10))) +
+  #geom_point() +
+  geom_boxplot(notch = TRUE) +
+  facet_grid(~psi*`p1|1`, labeller = purrr::partial(label_both, sep = " = ")) +
+  geom_hline(yintercept=0, size=0.3) +
+  theme_bw()
+```
+
+**Figure S5.2 - Bias of the estimated occupancy probability (**ψ) **from a model that does not account for FPE** fitted on simulated data for different values of ψ (0.1, 0.3 or 0.5), p1\|1 (0.7 or 0.9) and p1\|0 (0, 0.01, 0.02, 0.05), with an inter-quadrat standard deviation of the detection probability of 0.2 x p1\|1. The thick line in a box indicates the median value, the box goes from the first to the third quartile and the whiskers extend from the minimum to the maximum value within 1.5 times the interquartile range from the box. Dots represent outliers. The medians of two groups differ if the notches around these medians do not overlap. p1\|1: probability of detecting the species in an occupied cell; p1\|0: probability of detecting the species in an unoccupied cell. <br>
+
+<br>
+
+<br>
+
+**Table S5 - Performance of the model for each combination of parameters** ψ, **p1\|1 and p1\|0 used to simulate the data,** for a model with an inter-quadrat standard deviation of the detection probability of 0.2 x p1\|1**.** The ψ bias corresponds to the difference between the predicted ψ and the ψ used to simulate the data, averaged over all 100 runs for each combination of parameters. The BCI (Bayesian Credible Interval) cover gives the number of runs out of the 100 runs for which the ψ used to simulate the data is contained in the BCI. The BCI width indicates the width of the BCI. The MSE (Mean Squared Error) corresponds to the average of the squared difference between the ψ used to simulate the data and the predicted ψ; the RMSE is the square root of the MSE. For every combination of parameters, all 100 model runs have converged. <br>
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.height = 7, fig.width = 3}
+TABLE %>%
+  as.data.frame() %>%
+  dplyr::select(-c(rel_psi,rel_p11,rel_p10, converged, estim_sd_lpsi, estim_sd_lp11,error.psi, biais.p11:rmse.p11)) %>%
+  mutate(biais_psi_prop = round(100*(biais.psi)/true_psi,1)) %>%
+  relocate(biais_psi_prop, .after = biais.psi) %>%
+  rename('psi' = true_psi,
+         'p1|1' = true_p11,
+         'p1|0' = true_p10,
+         'psi bias' = biais.psi,
+         'psi bias (%)' = biais_psi_prop,
+         'BCI cover' = BCI_cover.psi,
+         'BCI width' = BCI_width.psi,
+         'MSE' = mse.psi,
+         'RMSE' = rmse.psi) %>%
+  kbl(format = 'html') %>%
+  kable_classic(full_width = F, html_font = 'LM Roman')
+```
+
+# Appendix 6: Photography of a quadrat
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+image_read("pictures/Quadrat_picture.png") %>% 
+  image_ggplot(interpolate = TRUE)
+```
+
+**Figure S6 - Photography of a 1 x 1 m quadrat divided in 100 cells of 10 x 10 cm.** The species surveyed during this field session was *Calendula arvensis*.
